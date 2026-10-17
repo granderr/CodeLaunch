@@ -352,7 +352,13 @@ fn generate_macos_terminal_script(term: &Terminal, folder: &Folder) -> String {
     script.push_str(&format!("cd \"{}\" || exit 1\n", folder_path));
     script.push_str(&format!("printf '\\033]0;%s\\007' \"{}\"\n", title));
 
-    match (&term.command, term.keep_alive) {
+    let command = term
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+
+    match (command, term.keep_alive) {
         (Some(cmd), true) => {
             script.push_str(&format!(
                 "trap : INT; {}; exec \"${{SHELL:-zsh}}\" -l\n",
@@ -363,7 +369,7 @@ fn generate_macos_terminal_script(term: &Terminal, folder: &Folder) -> String {
             script.push_str(&format!("{}\n", cmd));
         }
         (None, _) => {
-            script.push_str("exec \"${{SHELL:-zsh}}\" -l\n");
+            script.push_str("exec \"${SHELL:-zsh}\" -l\n");
         }
     }
 
@@ -391,22 +397,28 @@ fi
 
 if [ "$USE_ITERM" -eq 1 ]; then
 osascript << 'APPLESCRIPT'
+set wasRunning to application "iTerm" is running
 tell application "iTerm"
     activate
+    if not wasRunning then
+        repeat 20 times
+            if (count of windows) > 0 then exit repeat
+            delay 0.1
+        end repeat
+    end if
 "#,
     );
 
     if grouped_scripts.is_empty() {
         if project.folders.is_empty() {
-            script.push_str("    set newWindow to (create window with default profile)\n");
+            script.push_str("    if not wasRunning and (count of windows) > 0 then\n        set newWindow to current window\n    else\n        set newWindow to (create window with default profile)\n    end if\n");
         } else {
             for (idx, folder) in project.folders.iter().enumerate() {
                 let path = resolve_folder_path(folder);
                 let escaped_path = path.replace('\\', "\\\\").replace('"', "\\\"");
                 if idx == 0 {
-                    script.push_str("    set newWindow to (create window with default profile)\n");
                     script.push_str(&format!(
-                        "    tell current session of newWindow\n        write text \"cd \\\"{}\\\" && exec $SHELL -l\"\n    end tell\n",
+                        "    if not wasRunning and (count of windows) > 0 then\n        set newWindow to current window\n    else\n        set newWindow to (create window with default profile)\n    end if\n    tell current session of newWindow\n        write text \"cd \\\"{}\\\" && exec $SHELL -l\"\n    end tell\n",
                         escaped_path
                     ));
                 } else {
@@ -420,10 +432,17 @@ tell application "iTerm"
     } else {
         for (g_idx, (_group, terms)) in grouped_scripts.iter().enumerate() {
             let win_var = format!("win_g{}", g_idx + 1);
-            script.push_str(&format!(
-                "    set {} to (create window with default profile)\n",
-                win_var
-            ));
+            if g_idx == 0 {
+                script.push_str(&format!(
+                    "    if not wasRunning and (count of windows) > 0 then\n        set {} to current window\n    else\n        set {} to (create window with default profile)\n    end if\n",
+                    win_var, win_var
+                ));
+            } else {
+                script.push_str(&format!(
+                    "    set {} to (create window with default profile)\n",
+                    win_var
+                ));
+            }
             for (t_idx, (_term, script_path)) in terms.iter().enumerate() {
                 let path_str = script_path.display().to_string();
                 let escaped_path = path_str.replace('\\', "\\\\").replace('"', "\\\"");
@@ -445,7 +464,7 @@ tell application "iTerm"
 
     script.push_str("end tell\nAPPLESCRIPT\nelse\n");
 
-    script.push_str("osascript << 'APPLESCRIPT'\nset wasRunning to application \"Terminal\" is running\ntell application \"Terminal\"\n    activate\n    if not wasRunning then\n        repeat 10 times\n            if (count of windows) > 0 then exit repeat\n            delay 0.1\n        end repeat\n    end if\n");
+    script.push_str("osascript << 'APPLESCRIPT'\nset wasRunning to application \"Terminal\" is running\ntell application \"Terminal\"\n    activate\n    if not wasRunning then\n        repeat 20 times\n            if (count of windows) > 0 then exit repeat\n            delay 0.1\n        end repeat\n    end if\n");
 
     if grouped_scripts.is_empty() {
         if project.folders.is_empty() {
@@ -460,7 +479,7 @@ tell application "iTerm"
                         escaped_path, escaped_path
                     ));
                 } else {
-                    script.push_str("    delay 0.5\n    try\n        tell application \"System Events\" to tell process \"Terminal\"\n            keystroke \"t\" using {command down}\n        end tell\n        delay 0.5\n");
+                    script.push_str("    delay 0.5\n    try\n        tell application \"System Events\" to tell process \"Terminal\"\n            keystroke \"t\" using {command down}\n        end tell\n        repeat 20 times\n            delay 0.1\n            if not busy of selected tab of front window then exit repeat\n        end repeat\n");
                     script.push_str(&format!("        do script \"cd \\\"{}\\\" && exec $SHELL -l\" in selected tab of front window\n    on error\n        do script \"cd \\\"{}\\\" && exec $SHELL -l\"\n    end try\n", escaped_path, escaped_path));
                 }
             }
@@ -487,7 +506,7 @@ tell application "iTerm"
                     ));
                 } else {
                     // Additional terminals in the same group open as tabs in that window
-                    script.push_str("    delay 0.5\n    try\n        tell application \"System Events\" to tell process \"Terminal\"\n            keystroke \"t\" using {command down}\n        end tell\n        delay 0.5\n");
+                    script.push_str("    delay 0.5\n    try\n        tell application \"System Events\" to tell process \"Terminal\"\n            keystroke \"t\" using {command down}\n        end tell\n        repeat 20 times\n            delay 0.1\n            if not busy of selected tab of front window then exit repeat\n        end repeat\n");
                     script.push_str(&format!(
                         "        do script \"exec \\\"{}\\\"\" in selected tab of front window\n    on error\n        do script \"exec \\\"{}\\\"\"\n    end try\n",
                         escaped_path, escaped_path
@@ -512,7 +531,13 @@ fn generate_linux_terminal_script(term: &Terminal, folder: &Folder) -> String {
     script.push_str(&format!("cd \"{}\" || exit 1\n", folder_path));
     script.push_str(&format!("printf '\\033]0;%s\\007' \"{}\"\n", title));
 
-    match (&term.command, term.keep_alive) {
+    let command = term
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+
+    match (command, term.keep_alive) {
         (Some(cmd), true) => {
             script.push_str(&format!(
                 "trap : INT; {}; exec \"${{SHELL:-bash}}\" -l\n",
@@ -523,7 +548,7 @@ fn generate_linux_terminal_script(term: &Terminal, folder: &Folder) -> String {
             script.push_str(&format!("{}\n", cmd));
         }
         (None, _) => {
-            script.push_str("exec \"${{SHELL:-bash}}\" -l\n");
+            script.push_str("exec \"${SHELL:-bash}\" -l\n");
         }
     }
 
@@ -684,7 +709,13 @@ fn generate_windows_terminal_script(term: &Terminal, folder: &Folder) -> String 
         script.push_str(&format!("cd /d \"{}\"\n", folder_path));
     }
 
-    match (&term.command, term.keep_alive) {
+    let command = term
+        .command
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+
+    match (command, term.keep_alive) {
         (Some(cmd), true) => {
             script.push_str(&format!("call {}\n", cmd));
         }
@@ -822,7 +853,9 @@ mod tests {
 
         let master = fs::read_to_string(&rendered.entry_path).unwrap();
         // iTerm2 branch
+        assert!(master.contains("set wasRunning to application \"iTerm\" is running"));
         assert!(master.contains("tell application \"iTerm\"\n    activate"));
+        assert!(master.contains("set win_g1 to current window"));
         assert!(master.contains("create window with default profile"));
         assert!(master.contains("create tab with default profile"));
         // Terminal.app fallback branch
@@ -830,6 +863,7 @@ mod tests {
         assert!(master.contains("do script \"exec"));
         // Second terminal in the same group creates a tab in that window
         assert!(master.contains("keystroke \"t\" using {command down}"));
+        assert!(master.contains("if not busy of selected tab of front window then exit repeat"));
         assert!(master.contains("in selected tab of front window"));
 
         let term1_content = fs::read_to_string(&rendered.generated_files[0]).unwrap();
@@ -1000,5 +1034,27 @@ mod tests {
         assert!(rendered2
             .entry_path
             .starts_with(tmp.path().join(project2.id.to_string())));
+    }
+
+    #[test]
+    fn render_terminal_with_empty_or_whitespace_command_produces_interactive_shell() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut project = Project::new("Empty Cmd App", IdeKind::Terminal);
+        let folder = Folder::new("Root", "/path/to/root");
+        let folder_id = folder.id;
+        project.folders.push(folder);
+        project.terminals_enabled = true;
+
+        let mut group = TerminalGroup::new("Group 1", 1);
+        let mut term1 = Terminal::new("Shell 1", folder_id, 0);
+        term1.command = Some("   ".into());
+        term1.keep_alive = true;
+        group.terminals.push(term1);
+        project.terminal_groups.push(group);
+
+        let rendered = render_for_os(&project, tmp.path(), TargetOs::MacOs).unwrap();
+        let content = fs::read_to_string(&rendered.generated_files[0]).unwrap();
+        assert!(content.contains("exec \"${SHELL:-zsh}\" -l"));
+        assert!(!content.contains("trap : INT;"));
     }
 }
